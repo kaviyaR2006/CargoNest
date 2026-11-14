@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isProvider() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'provider'
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+
+    function isCustomer() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'customer'
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+
+    match /users/{userId} {
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasOnly([
+          'name', 'email', 'phone', 'role', 'status', 'createdAt'
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.phone is string
+        && request.resource.data.role in ['customer', 'provider']
+        && ((request.resource.data.role == 'customer'
+              && request.resource.data.status == 'active')
+            || (request.resource.data.role == 'provider'
+              && request.resource.data.status == 'pending'))
+        && request.resource.data.createdAt == request.time;
+
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+
+      allow update: if isAdmin()
+        || (isOwner(userId)
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone']));
+
+      allow delete: if isAdmin();
+    }
+
+    match /containers/{containerId} {
+      allow create: if isProvider()
+        && request.resource.data.providerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasOnly([
+          'code', 'providerId', 'providerName', 'type', 'maxWeight',
+          'totalSpace', 'bookingPrice', 'pickupCity', 'destinationCity',
+          'description', 'status', 'reservedWeight', 'reservedSpace', 'createdAt'
+        ])
+        && request.resource.data.reservedWeight == 0
+        && request.resource.data.reservedSpace == 0
+        && request.resource.data.code is string
+        && request.resource.data.providerName is string
+        && request.resource.data.type is string
+        && request.resource.data.maxWeight is number
+        && request.resource.data.totalSpace is number
+        && request.resource.data.bookingPrice is number
+        && request.resource.data.pickupCity is string
+        && request.resource.data.destinationCity is string
+        && request.resource.data.description is string
+        && request.resource.data.createdAt == request.time;
+
+      allow get, list: if isAdmin()
+        || (signedIn() && resource.data.providerId == request.auth.uid)
+        || (isCustomer() && resource.data.status == 'approved');
+
+      allow update: if (isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['approved', 'rejected'])
+        || (isProvider()
+          && resource.data.providerId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'gpsWeight', 'ultrasonicDistance', 'latitude', 'longitude',
+            'gpsStatus', 'firebase_updated_ms'
+          ]))
+        || (isProvider()
+          && resource.data.providerId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'reservedWeight', 'reservedSpace'
+          ])
+          && request.resource.data.reservedWeight is number
+          && request.resource.data.reservedSpace is number
+          && request.resource.data.reservedWeight >= 0
+          && request.resource.data.reservedWeight <= resource.data.maxWeight
+          && request.resource.data.reservedSpace >= 0
+          && request.resource.data.reservedSpace <= resource.data.totalSpace);
+
+      allow delete: if isAdmin();
+    }
+
+    match /bookings/{bookingId} {
+      allow create: if isCustomer()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'bookingCode', 'customerId', 'customerName', 'customerEmail', 'customerPhone',
+          'providerId', 'providerName', 'containerId', 'containerCode',
+          'pickupCity', 'destinationCity', 'route', 'cargoWeight',
+          'requiredSpace', 'amount', 'bookingStatus', 'paymentStatus',
+          'capacityReserved', 'capacityReservationStatus', 'createdAt'
+        ])
+        && request.resource.data.bookingCode is string
+        && request.resource.data.customerName is string
+        && request.resource.data.customerEmail == request.auth.token.email
+        && request.resource.data.customerPhone is string
+        && request.resource.data.providerId is string
+        && request.resource.data.containerId is string
+        && exists(/databases/$(database)/documents/containers/$(request.resource.data.containerId))
+        && get(/databases/$(database)/documents/containers/$(request.resource.data.containerId)).data.providerId == request.resource.data.providerId
+        && get(/databases/$(database)/documents/containers/$(request.resource.data.containerId)).data.status == 'approved'
+        && request.resource.data.cargoWeight is number
+        && request.resource.data.cargoWeight > 0
+        && request.resource.data.requiredSpace is number
+        && request.resource.data.requiredSpace > 0
+        && request.resource.data.amount is number
+        && request.resource.data.bookingStatus == 'pending'
+        && request.resource.data.paymentStatus == 'pending'
+        && request.resource.data.capacityReserved == false
+        && request.resource.data.capacityReservationStatus == 'none'
+        && request.resource.data.createdAt == request.time;
+
+      allow get, list: if isAdmin()
+        || (signedIn() && resource.data.customerId == request.auth.uid)
+        || (signedIn() && resource.data.providerId == request.auth.uid);
+
+      allow update: if isAdmin()
+        || (signedIn()
+          && resource.data.providerId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'bookingStatus', 'updatedAt', 'capacityReserved', 'capacityReservationStatus'
+          ])
+          && request.resource.data.bookingStatus in [
+            'accepted', 'rejected', 'picked up', 'in transit', 'delivered'
+          ]
+          && (request.resource.data.bookingStatus != 'accepted'
+              || (request.resource.data.capacityReserved == true
+                  && request.resource.data.capacityReservationStatus == 'held'))
+          && (request.resource.data.bookingStatus != 'rejected'
+              || request.resource.data.capacityReservationStatus in ['none', 'released'])
+          && request.resource.data.updatedAt == request.time)
+        || (isCustomer()
+          && resource.data.customerId == request.auth.uid
+          && resource.data.bookingStatus == 'accepted'
+          && resource.data.paymentStatus == 'pending'
+          && resource.data.capacityReserved == true
+          && resource.data.capacityReservationStatus == 'held'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'paymentStatus', 'capacityReservationStatus', 'paymentMethod',
+            'paymentTransaction', 'paidAt'
+          ])
+          && request.resource.data.paymentStatus == 'success'
+          && request.resource.data.capacityReservationStatus == 'committed'
+          && request.resource.data.paymentMethod == 'Net Banking Demo'
+          && request.resource.data.paymentTransaction is string
+          && request.resource.data.paidAt == request.time);
+
+      allow delete: if isAdmin();
+    }
+  }
+}
